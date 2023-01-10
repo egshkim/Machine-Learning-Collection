@@ -53,6 +53,7 @@ class Yolov1(nn.Module):
         self.architecture = architecture_config
         self.in_channels = in_channels
         self.darknet = self._create_conv_layers(self.architecture)
+        # darknet is a sort of assemble of conv layers
         self.fcs = self._create_fcs(**kwargs)
 
     def forward(self, x):

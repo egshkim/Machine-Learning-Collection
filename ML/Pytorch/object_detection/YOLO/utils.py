@@ -31,19 +31,20 @@ def intersection_over_union(boxes_preds, boxes_labels, box_format="midpoint"):
         box1_x1 = boxes_preds[..., 0:1]
         box1_y1 = boxes_preds[..., 1:2]
         box1_x2 = boxes_preds[..., 2:3]
-        box1_y2 = boxes_preds[..., 3:4]  # (N, 1)
-        box2_x1 = boxes_labels[..., 0:1]
+        box1_y2 = boxes_preds[..., 3:4]  # result shape : (N, 1)
+        box2_x1 = boxes_labels[..., 0:1] # if box1_y2 = boxes_preds[..., 3] : then result shape is (N)
         box2_y1 = boxes_labels[..., 1:2]
         box2_x2 = boxes_labels[..., 2:3]
         box2_y2 = boxes_labels[..., 3:4]
 
-    x1 = torch.max(box1_x1, box2_x1)
+    x1 = torch.max(box1_x1, box2_x1) # calculate the coordinates of the corners in the intersection box
     y1 = torch.max(box1_y1, box2_y1)
     x2 = torch.min(box1_x2, box2_x2)
     y2 = torch.min(box1_y2, box2_y2)
 
     # .clamp(0) is for the case when they do not intersect
     intersection = (x2 - x1).clamp(0) * (y2 - y1).clamp(0)
+    # (x2-x1) 의 값이 0 보다 작다면 0 으로 교체한다. (y2-y1) 의 값이 0 보다 작다면 0 으로 교체한다.
 
     box1_area = abs((box1_x2 - box1_x1) * (box1_y2 - box1_y1))
     box2_area = abs((box2_x2 - box2_x1) * (box2_y2 - box2_y1))
@@ -97,10 +98,24 @@ def mean_average_precision(
 ):
     """
     Calculates mean average precision 
+    
+    1. 클래스 별로 mAP 를 구할 것이다. 첫 번째 클래스를 갖는 pred_boxes 만 detections 라는 리스트에 넣는다.
+    2. 첫 번째 클래스를 갖는 true_boxes 만 ground_truths 리스트에 넣는다.
+    3. detections 를 Confidence score(prob_score) 로 내림차순한다.
+    4. 만약 첫 번째 클래스에 해당하는 ground truth 박스가 없다면 (ground_truths 리스트 길이가 0 이면) 다음 클래스에 대해 진행한다.
+    5. detections 리스트의 첫 번째 바운딩 박스와, 같은 이미지에 존재하는 ground truth 바운딩 박스들을 모두 ground_truth_img
+    에 저장한다.
+    6. detections 의 첫 번째 바운딩 박스에 대해서, 같은 이미지에 존재하는 ground truth 바운딩 박스들 모두, IoU 를 구한다.
+    7. 
 
     Parameters:
         pred_boxes (list): list of lists containing all bboxes with each bboxes
         specified as [train_idx, class_prediction, prob_score, x1, y1, x2, y2]
+        
+        train_idx : the image index the box trained on
+        class_prediction : the class of the object in this box, which is predicted by DL model
+        prob_score : Confidence
+        
         true_boxes (list): Similar as pred_boxes except all the correct ones 
         iou_threshold (float): threshold where predicted bboxes is correct
         box_format (str): "midpoint" or "corners" used to specify bboxes
@@ -145,7 +160,7 @@ def mean_average_precision(
             amount_bboxes[key] = torch.zeros(val)
 
         # sort by box probabilities which is index 2
-        detections.sort(key=lambda x: x[2], reverse=True)
+        detections.sort(key=lambda x: x[2], reverse=True) # reverse=True for descending oreder
         TP = torch.zeros((len(detections)))
         FP = torch.zeros((len(detections)))
         total_true_bboxes = len(ground_truths)
@@ -164,6 +179,7 @@ def mean_average_precision(
             num_gts = len(ground_truth_img)
             best_iou = 0
 
+            # 이제, ground_truth_img 중 detection 과 가장 높은 IoU 를 갖는 바운딩 박스를 찾아야한다.
             for idx, gt in enumerate(ground_truth_img):
                 iou = intersection_over_union(
                     torch.tensor(detection[3:]),
@@ -174,25 +190,30 @@ def mean_average_precision(
                 if iou > best_iou:
                     best_iou = iou
                     best_gt_idx = idx
+                    # 가장 높은 IoU 를 갖는 ground truth 박스와, 그 IoU 값을 변수에 저장해둔다.
 
-            if best_iou > iou_threshold:
+            if best_iou > iou_threshold: # meaning, this prediction is correct
                 # only detect ground truth detection once
                 if amount_bboxes[detection[0]][best_gt_idx] == 0:
                     # true positive and add this bounding box to seen
                     TP[detection_idx] = 1
                     amount_bboxes[detection[0]][best_gt_idx] = 1
-                else:
-                    FP[detection_idx] = 1
+                else: # detection[0] 은 바로 지금 이 predicted bounding box 가 predicted 된 이미지의 인덱스야.
+                    # 그러니까, for 문 내에서 다음 detection (confidence 가 더 낮은 바운딩박스) 에 접근하게 되면,
+                    # 다음 detection[0] 도 같은 이미지에서 학습된 것일 수도 있다고. 
+                    # 그럼 Confidence 더 높았던 detection 이 TP 가 되는거지.
+                    # 그래서 이게 FP 가 되어야해.
+                    FP[detection_idx] = 1 
 
             # if IOU is lower then the detection is a false positive
             else:
                 FP[detection_idx] = 1
 
-        TP_cumsum = torch.cumsum(TP, dim=0)
+        TP_cumsum = torch.cumsum(TP, dim=0) # [1,1,0,1,0] becomes [1,2,2,3,3] when cumsum is done.
         FP_cumsum = torch.cumsum(FP, dim=0)
         recalls = TP_cumsum / (total_true_bboxes + epsilon)
         precisions = torch.divide(TP_cumsum, (TP_cumsum + FP_cumsum + epsilon))
-        precisions = torch.cat((torch.tensor([1]), precisions))
+        precisions = torch.cat((torch.tensor([1]), precisions)) # 이건뭐지?
         recalls = torch.cat((torch.tensor([0]), recalls))
         # torch.trapz for numerical integration
         average_precisions.append(torch.trapz(precisions, recalls))
